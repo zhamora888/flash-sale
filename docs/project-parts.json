@@ -1,0 +1,54 @@
+{
+  "repository_type": "monorepo",
+  "project_name": "Flash Sale System",
+  "project_root": "flash-sale/",
+  "parts": [
+    {
+      "part_id": "server",
+      "display_name": "Flash Sale API Server",
+      "project_type_id": "backend",
+      "root_path": "flash-sale/server/",
+      "entry_point": "server/src/index.ts",
+      "language": "TypeScript 5.4",
+      "runtime": "Node.js",
+      "framework": "Express 4.18",
+      "port": 3001,
+      "test_command": "cd server && npm test",
+      "dev_command": "npm run dev --prefix server",
+      "build_command": "cd server && npm run build"
+    },
+    {
+      "part_id": "client",
+      "display_name": "Flash Sale React SPA",
+      "project_type_id": "web",
+      "root_path": "flash-sale/client/",
+      "entry_point": "client/src/main.tsx",
+      "language": "TypeScript 5.5",
+      "runtime": "Browser",
+      "framework": "React 18.3 + Vite 5.3",
+      "port": 5173,
+      "dev_command": "npm run dev --prefix client",
+      "build_command": "cd client && npm run build"
+    }
+  ],
+  "integration_points": [
+    {
+      "from": "client",
+      "to": "server",
+      "type": "REST API (HTTP/JSON)",
+      "details": "GET /api/sale/status · POST /api/purchase · GET /api/purchase/status?userId=",
+      "dev_proxy": "Vite proxy /api → http://localhost:3001",
+      "prod_proxy": "Express serves client/dist/ as static — same origin, no CORS"
+    }
+  ],
+  "shared_infrastructure": [
+    {
+      "service": "Redis 7",
+      "image": "redis:7-alpine",
+      "port": 6379,
+      "persistence": "AOF (appendonly yes, appendfsync everysec)",
+      "volume": "redis-data",
+      "started_via": "docker compose up -d"
+    }
+  ]
+}
