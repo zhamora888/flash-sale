@@ -20,7 +20,9 @@ const FEEDBACK: Record<PurchaseResultValue | 'network_error', string> = {
 };
 
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 'Unknown';
+  return d.toLocaleString(undefined, {
     dateStyle: 'medium',
     timeStyle: 'short',
   });
@@ -69,7 +71,7 @@ export default function App() {
     setUserId(value);
     try { localStorage.setItem(STORAGE_KEY, value); } catch { /* quota/private mode — non-fatal */ }
     setFeedback(null);
-    setPurchased(false);
+    if (value.trim() !== userId.trim()) setPurchased(false);
   }
 
   async function handleBuy() {

@@ -37,6 +37,7 @@ export async function attemptPurchase(userId: string): Promise<PurchaseResult> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ userId }),
   });
+  if (!res.ok) throw new Error(`Purchase attempt failed: ${res.status}`);
   return res.json() as Promise<PurchaseResult>;
 }
 
