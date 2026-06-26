@@ -1,5 +1,8 @@
+import * as dotenv from 'dotenv';
 import * as path from 'path';
 import express from 'express';
+
+dotenv.config({ path: path.join(__dirname, '..', '..', '.env') });
 import cors from 'cors';
 import { createRedisClient } from './redis/client';
 import { loadScript } from './redis/adapter';
