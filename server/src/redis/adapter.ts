@@ -9,7 +9,7 @@ let cachedSha: string | null = null;
 export async function loadScript(client: RedisClient): Promise<void> {
   const luaPath = path.join(__dirname, 'scripts', 'purchase.lua');
   const luaSource = fs.readFileSync(luaPath, 'utf-8');
-  cachedSha = await client.sendCommand(['SCRIPT', 'LOAD', luaSource]) as string;
+  cachedSha = await client.scriptLoad(luaSource);
 }
 
 export async function executePurchase(
@@ -21,14 +21,20 @@ export async function executePurchase(
     throw new Error('Lua script not loaded. Call loadScript() first.');
   }
 
-  const result = await client.sendCommand([
-    'EVALSHA',
-    cachedSha,
-    '0',
-    userId,
-    timestamp,
-  ]) as number;
+  let raw: unknown;
+  try {
+    raw = await client.evalSha(cachedSha, { keys: [], arguments: [userId, timestamp] });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('NOSCRIPT')) {
+      await loadScript(client);
+      raw = await client.evalSha(cachedSha!, { keys: [], arguments: [userId, timestamp] });
+    } else {
+      throw err;
+    }
+  }
 
+  const result = raw as number;
   switch (result) {
     case 0:
       return 'success';

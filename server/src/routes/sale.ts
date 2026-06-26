@@ -2,12 +2,12 @@ import { Router, Request, Response } from 'express';
 import { RedisClient } from '../redis/client';
 import { getSaleStatus } from '../service/saleService';
 
-export function createSaleRouter(redisClient: RedisClient): Router {
+export function createSaleRouter(redisClient: RedisClient, saleStart: Date, saleEnd: Date): Router {
   const router = Router();
 
   router.get('/status', async (_req: Request, res: Response) => {
     try {
-      const statusResult = await getSaleStatus(new Date(), redisClient);
+      const statusResult = await getSaleStatus(new Date(), redisClient, saleStart, saleEnd);
       res.json(statusResult);
     } catch (err) {
       console.error('[GET /api/sale/status] Error:', err);

@@ -1,12 +1,23 @@
 import { Router, Request, Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { RedisClient } from '../redis/client';
-import { attemptPurchase } from '../service/purchaseService';
+import { attemptPurchase, getPurchaseStatus } from '../service/purchaseService';
 
-export function createPurchaseRouter(redisClient: RedisClient): Router {
+const MAX_USER_ID_LENGTH = 256;
+
+const purchaseLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { result: 'rate_limited' },
+});
+
+export function createPurchaseRouter(redisClient: RedisClient, saleStart: Date, saleEnd: Date): Router {
   const router = Router();
 
   // POST /api/purchase
-  router.post('/', async (req: Request, res: Response) => {
+  router.post('/', purchaseLimiter, async (req: Request, res: Response) => {
     const { userId } = req.body ?? {};
 
     if (!userId || typeof userId !== 'string' || userId.trim() === '') {
@@ -14,16 +25,17 @@ export function createPurchaseRouter(redisClient: RedisClient): Router {
       return;
     }
 
+    if (userId.length > MAX_USER_ID_LENGTH) {
+      res.status(400).json({ result: 'invalid_request' });
+      return;
+    }
+
     try {
-      const outcome = await attemptPurchase(userId.trim(), new Date(), redisClient);
+      const outcome = await attemptPurchase(userId.trim(), new Date(), redisClient, saleStart, saleEnd);
 
       switch (outcome.result) {
         case 'success':
-          res.status(200).json({
-            result: 'success',
-            userId: userId.trim(),
-            purchasedAt: outcome.purchasedAt,
-          });
+          res.status(200).json({ result: 'success', userId: userId.trim(), purchasedAt: outcome.purchasedAt });
           break;
         case 'already_purchased':
           res.status(409).json({ result: 'already_purchased' });
@@ -34,9 +46,6 @@ export function createPurchaseRouter(redisClient: RedisClient): Router {
         case 'sale_not_active':
           res.status(400).json({ result: 'sale_not_active' });
           break;
-        case 'invalid_request':
-          res.status(400).json({ result: 'invalid_request' });
-          break;
         default:
           res.status(500).json({ result: 'internal_error' });
       }
@@ -46,26 +55,20 @@ export function createPurchaseRouter(redisClient: RedisClient): Router {
     }
   });
 
-  // GET /api/purchase/status?userId=:userId
-  router.get('/status', async (req: Request, res: Response) => {
-    const userId = req.query['userId'];
+  // GET /api/purchase/status/:userId
+  router.get('/status/:userId', async (req: Request, res: Response) => {
+    const { userId } = req.params;
 
-    if (!userId || typeof userId !== 'string' || userId.trim() === '') {
+    if (!userId || userId.trim() === '' || userId.length > MAX_USER_ID_LENGTH) {
       res.status(400).json({ result: 'invalid_request' });
       return;
     }
 
     try {
-      const key = `flash:purchased:${userId.trim()}`;
-      const purchasedAt = await redisClient.get(key);
-
-      if (purchasedAt !== null) {
-        res.json({ purchased: true, purchasedAt });
-      } else {
-        res.json({ purchased: false });
-      }
+      const status = await getPurchaseStatus(userId.trim(), redisClient);
+      res.json(status);
     } catch (err) {
-      console.error('[GET /api/purchase/status] Error:', err);
+      console.error('[GET /api/purchase/status/:userId] Error:', err);
       res.status(500).json({ result: 'internal_error' });
     }
   });

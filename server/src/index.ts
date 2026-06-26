@@ -1,8 +1,9 @@
 import * as dotenv from 'dotenv';
 import * as path from 'path';
-import express from 'express';
 
 dotenv.config({ path: path.join(__dirname, '..', '..', '.env') });
+
+import express from 'express';
 import cors from 'cors';
 import { createRedisClient } from './redis/client';
 import { loadScript } from './redis/adapter';
@@ -71,27 +72,18 @@ function validateEnv(): {
   const port = parseInt(process.env['PORT'] ?? '3001', 10);
   const nodeEnv = process.env['NODE_ENV'] ?? 'development';
 
-  return {
-    stockQuantity,
-    saleStart,
-    saleEnd,
-    redisUrl: rawRedis as string,
-    port,
-    nodeEnv,
-  };
+  return { stockQuantity, saleStart, saleEnd, redisUrl: rawRedis as string, port, nodeEnv };
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
 
 async function bootstrap(): Promise<void> {
-  const { stockQuantity, redisUrl, port, nodeEnv } = validateEnv();
+  const { stockQuantity, saleStart, saleEnd, redisUrl, port, nodeEnv } = validateEnv();
 
-  // Connect to Redis
   console.log(`[Startup] Connecting to Redis at ${redisUrl} …`);
   const redisClient = await createRedisClient(redisUrl);
   console.log('[Startup] Redis connected.');
 
-  // Load Lua script (AD-1)
   await loadScript(redisClient);
   console.log('[Startup] Lua purchase script loaded.');
 
@@ -115,9 +107,9 @@ async function bootstrap(): Promise<void> {
     console.log('[Startup] CORS enabled (development mode).');
   }
 
-  // Routes (AD-3: routes → service → redis adapter)
-  app.use('/api/sale', createSaleRouter(redisClient));
-  app.use('/api/purchase', createPurchaseRouter(redisClient));
+  // Routes — saleStart/saleEnd parsed once at startup, passed down (AD-3)
+  app.use('/api/sale', createSaleRouter(redisClient, saleStart, saleEnd));
+  app.use('/api/purchase', createPurchaseRouter(redisClient, saleStart, saleEnd));
 
   // Serve static client build in production
   if (nodeEnv === 'production') {
@@ -128,9 +120,23 @@ async function bootstrap(): Promise<void> {
     });
   }
 
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log(`[Startup] Server listening on http://localhost:${port}`);
   });
+
+  // ─── Graceful Shutdown ────────────────────────────────────────────────────
+
+  function shutdown(): void {
+    console.log('[Shutdown] Closing server…');
+    server.close(async () => {
+      await redisClient.quit();
+      console.log('[Shutdown] Redis disconnected. Exiting.');
+      process.exit(0);
+    });
+  }
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 bootstrap().catch((err: Error) => {

@@ -31,10 +31,20 @@ async function resetRedis(): Promise<void> {
   const client = createClient({ url: REDIS_URL });
   await client.connect();
   await client.set('flash:stock', STOCK_QUANTITY);
-  const purchased = await client.keys('flash:purchased:*');
-  if (purchased.length > 0) await client.del(purchased);
+
+  let cleared = 0;
+  let cursor = 0;
+  do {
+    const reply = await client.scan(cursor, { MATCH: 'flash:purchased:*', COUNT: 100 });
+    cursor = reply.cursor;
+    if (reply.keys.length > 0) {
+      await client.del(reply.keys);
+      cleared += reply.keys.length;
+    }
+  } while (cursor !== 0);
+
   await client.disconnect();
-  console.log(`[Reset] flash:stock = ${STOCK_QUANTITY}, cleared ${purchased.length} purchase record(s).`);
+  console.log(`[Reset] flash:stock = ${STOCK_QUANTITY}, cleared ${cleared} purchase record(s).`);
 }
 
 async function runScenario(

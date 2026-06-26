@@ -7,7 +7,7 @@ export async function createRedisClient(redisUrl: string): Promise<RedisClient> 
 
   client.on('error', (err: Error) => {
     console.error('[Redis] Connection error:', err.message);
-    process.exit(1);
+    // node-redis handles reconnection automatically — do not exit here
   });
 
   await client.connect();

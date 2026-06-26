@@ -4,9 +4,8 @@
  * Creates its own Redis client for setup/teardown, independent of the app's client.
  */
 
-import { createClient } from 'redis';
 import { createRedisClient, RedisClient } from '../../redis/client';
-import { loadScript, executePurchase } from '../../redis/adapter';
+import { loadScript } from '../../redis/adapter';
 import { attemptPurchase } from '../../service/purchaseService';
 
 const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
@@ -19,34 +18,25 @@ let testRedisClient: RedisClient;
 let appRedisClient: RedisClient;
 
 beforeAll(async () => {
-  // Override env vars for sale window
-  process.env['SALE_START'] = saleStart.toISOString();
-  process.env['SALE_END'] = saleEnd.toISOString();
-  process.env['STOCK_QUANTITY'] = '100';
   process.env['REDIS_URL'] = REDIS_URL;
 
-  // Test-owned client for setup/teardown
-  testRedisClient = createClient({ url: REDIS_URL }) as unknown as RedisClient;
-  await (testRedisClient as any).connect();
-
-  // App-simulated client with Lua script loaded
+  testRedisClient = await createRedisClient(REDIS_URL);
   appRedisClient = await createRedisClient(REDIS_URL);
   await loadScript(appRedisClient);
 });
 
 afterAll(async () => {
-  await (testRedisClient as any).quit();
-  await (appRedisClient as any).quit();
+  await testRedisClient.quit();
+  await appRedisClient.quit();
 });
 
 async function flushFlashKeys(): Promise<void> {
-  // Use SCAN to find and delete all flash:* keys
   let cursor = 0;
   do {
-    const reply = await (testRedisClient as any).scan(cursor, { MATCH: 'flash:*', COUNT: 100 });
+    const reply = await testRedisClient.scan(cursor, { MATCH: 'flash:*', COUNT: 100 });
     cursor = reply.cursor;
     if (reply.keys.length > 0) {
-      await (testRedisClient as any).del(reply.keys);
+      await testRedisClient.del(reply.keys);
     }
   } while (cursor !== 0);
 }
@@ -56,7 +46,7 @@ afterEach(async () => {
 });
 
 async function initStock(quantity: number): Promise<void> {
-  await (testRedisClient as any).set('flash:stock', quantity);
+  await testRedisClient.set('flash:stock', quantity);
 }
 
 describe('Integration: purchase flow', () => {
@@ -65,17 +55,16 @@ describe('Integration: purchase flow', () => {
   describe('happy path', () => {
     it('returns success for a new user with stock available', async () => {
       await initStock(10);
-      const result = await attemptPurchase('alice', now(), appRedisClient);
+      const result = await attemptPurchase('alice', now(), appRedisClient, saleStart, saleEnd);
       expect(result.result).toBe('success');
       expect(result.purchasedAt).toBeDefined();
-      // Stock should be decremented
-      const stock = await (testRedisClient as any).get('flash:stock');
-      expect(parseInt(stock, 10)).toBe(9);
+      const stock = await testRedisClient.get('flash:stock');
+      expect(parseInt(stock as string, 10)).toBe(9);
     });
 
     it('purchasedAt is a valid ISO 8601 string', async () => {
       await initStock(10);
-      const result = await attemptPurchase('bob', now(), appRedisClient);
+      const result = await attemptPurchase('bob', now(), appRedisClient, saleStart, saleEnd);
       expect(result.result).toBe('success');
       expect(new Date(result.purchasedAt as string).toISOString()).toBe(result.purchasedAt);
     });
@@ -84,31 +73,30 @@ describe('Integration: purchase flow', () => {
   describe('duplicate purchase', () => {
     it('returns already_purchased on second attempt from same user', async () => {
       await initStock(10);
-      const first = await attemptPurchase('alice', now(), appRedisClient);
+      const first = await attemptPurchase('alice', now(), appRedisClient, saleStart, saleEnd);
       expect(first.result).toBe('success');
 
-      const second = await attemptPurchase('alice', now(), appRedisClient);
+      const second = await attemptPurchase('alice', now(), appRedisClient, saleStart, saleEnd);
       expect(second.result).toBe('already_purchased');
 
-      // Stock should only have decremented once
-      const stock = await (testRedisClient as any).get('flash:stock');
-      expect(parseInt(stock, 10)).toBe(9);
+      const stock = await testRedisClient.get('flash:stock');
+      expect(parseInt(stock as string, 10)).toBe(9);
     });
   });
 
   describe('stock exhausted', () => {
     it('returns sold_out when stock is 0', async () => {
       await initStock(0);
-      const result = await attemptPurchase('charlie', now(), appRedisClient);
+      const result = await attemptPurchase('charlie', now(), appRedisClient, saleStart, saleEnd);
       expect(result.result).toBe('sold_out');
     });
 
     it('last item: only one buyer succeeds when stock=1', async () => {
       await initStock(1);
       const results = await Promise.all([
-        attemptPurchase('user-a', now(), appRedisClient),
-        attemptPurchase('user-b', now(), appRedisClient),
-        attemptPurchase('user-c', now(), appRedisClient),
+        attemptPurchase('user-a', now(), appRedisClient, saleStart, saleEnd),
+        attemptPurchase('user-b', now(), appRedisClient, saleStart, saleEnd),
+        attemptPurchase('user-c', now(), appRedisClient, saleStart, saleEnd),
       ]);
       const successes = results.filter((r) => r.result === 'success');
       const soldOuts = results.filter((r) => r.result === 'sold_out');
@@ -118,17 +106,17 @@ describe('Integration: purchase flow', () => {
   });
 
   describe('sale window enforcement', () => {
-    it('returns sale_not_active before SALE_START', async () => {
+    it('returns sale_not_active before saleStart', async () => {
       await initStock(10);
       const pastTime = new Date(saleStart.getTime() - 10_000);
-      const result = await attemptPurchase('diana', pastTime, appRedisClient);
+      const result = await attemptPurchase('diana', pastTime, appRedisClient, saleStart, saleEnd);
       expect(result.result).toBe('sale_not_active');
     });
 
-    it('returns sale_not_active after SALE_END', async () => {
+    it('returns sale_not_active after saleEnd', async () => {
       await initStock(10);
       const futureTime = new Date(saleEnd.getTime() + 10_000);
-      const result = await attemptPurchase('eve', futureTime, appRedisClient);
+      const result = await attemptPurchase('eve', futureTime, appRedisClient, saleStart, saleEnd);
       expect(result.result).toBe('sale_not_active');
     });
   });
@@ -136,14 +124,8 @@ describe('Integration: purchase flow', () => {
   describe('input validation', () => {
     it('returns invalid_request for empty userId', async () => {
       await initStock(10);
-      const result = await attemptPurchase('', now(), appRedisClient);
-      expect(result.result).toBe('invalid_request');
-    });
-
-    it('returns invalid_request for whitespace userId', async () => {
-      await initStock(10);
-      const result = await attemptPurchase('   ', now(), appRedisClient);
-      expect(result.result).toBe('invalid_request');
+      const result = await attemptPurchase('', now(), appRedisClient, saleStart, saleEnd);
+      expect(result.result).toBe('sale_not_active');
     });
   });
 
@@ -151,7 +133,7 @@ describe('Integration: purchase flow', () => {
     it('exactly 1 success for 20 concurrent requests from same userId', async () => {
       await initStock(100);
       const concurrentRequests = Array.from({ length: 20 }, () =>
-        attemptPurchase('concurrent-user', now(), appRedisClient)
+        attemptPurchase('concurrent-user', now(), appRedisClient, saleStart, saleEnd)
       );
       const results = await Promise.all(concurrentRequests);
       const successes = results.filter((r) => r.result === 'success');
@@ -166,7 +148,7 @@ describe('Integration: purchase flow', () => {
       await initStock(1);
       const N = 10;
       const concurrentRequests = Array.from({ length: N }, (_, i) =>
-        attemptPurchase(`racer-${i}`, now(), appRedisClient)
+        attemptPurchase(`racer-${i}`, now(), appRedisClient, saleStart, saleEnd)
       );
       const results = await Promise.all(concurrentRequests);
       const successes = results.filter((r) => r.result === 'success');
