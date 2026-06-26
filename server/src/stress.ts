@@ -9,8 +9,10 @@
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const autocannon = require('autocannon');
+import { createClient } from 'redis';
 
 const BASE_URL = process.env['STRESS_TARGET'] ?? 'http://localhost:3001';
+const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
 const STOCK_QUANTITY = parseInt(process.env['STOCK_QUANTITY'] ?? '100', 10);
 
 interface AutocannonResult {
@@ -23,6 +25,16 @@ interface AutocannonResult {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function resetRedis(): Promise<void> {
+  const client = createClient({ url: REDIS_URL });
+  await client.connect();
+  await client.set('flash:stock', STOCK_QUANTITY);
+  const purchased = await client.keys('flash:purchased:*');
+  if (purchased.length > 0) await client.del(purchased);
+  await client.disconnect();
+  console.log(`[Reset] flash:stock = ${STOCK_QUANTITY}, cleared ${purchased.length} purchase record(s).`);
 }
 
 async function runScenario(
@@ -69,27 +81,48 @@ function printSummary(title: string, result: AutocannonResult, expectedSuccesses
 }
 
 async function scenarioA(): Promise<void> {
-  // Unique buyers: one unique userId per request so successes == STOCK_QUANTITY
-  const amount = STOCK_QUANTITY + 50; // extra requests that should get sold_out
-  const requests = Array.from({ length: amount }, (_, i) => ({
-    method: 'POST',
-    path: '/api/purchase',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ userId: `stress-a-user-${i + 1}` }),
-  }));
+  // autocannon cycles its requests array from index 0 independently per connection,
+  // so sharing a requests array across N connections always reuses the same first-N
+  // entries. Native fetch + Promise.all fires every request truly concurrently with
+  // a guaranteed-unique userId per request.
+  const amount = STOCK_QUANTITY + 50;
 
-  const result = await runScenario(
-    `Scenario A — Unique Buyers (STOCK_QUANTITY=${STOCK_QUANTITY}, amount=${amount})`,
-    {
-      url: BASE_URL,
-      requests,
-      connections: 50,
-      amount,
-      timeout: 30,
-    }
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`Scenario: Scenario A — Unique Buyers (STOCK_QUANTITY=${STOCK_QUANTITY}, amount=${amount})`);
+  console.log('='.repeat(60));
+
+  const start = Date.now();
+  const statuses = await Promise.all(
+    Array.from({ length: amount }, (_, i) =>
+      fetch(`${BASE_URL}/api/purchase`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: `stress-a-user-${i + 1}` }),
+      })
+        .then((r) => r.status)
+        .catch(() => 0),
+    ),
   );
+  const elapsed = Date.now() - start;
 
-  printSummary('Scenario A', result, STOCK_QUANTITY);
+  const successCount = statuses.filter((s) => s === 200).length;
+  const soldOutCount = statuses.filter((s) => s === 410).length;
+  const errorCount = statuses.filter((s) => s === 0).length;
+  const passed = successCount === STOCK_QUANTITY;
+
+  console.log(`\n--- Scenario A Summary ---`);
+  console.log(`  Total requests    : ${amount}`);
+  console.log(`  200 (success)     : ${successCount}`);
+  console.log(`  410 (sold out)    : ${soldOutCount}`);
+  console.log(`  Errors            : ${errorCount}`);
+  console.log(`  Duration          : ${elapsed} ms`);
+  console.log(`  Expected successes: ${STOCK_QUANTITY}`);
+  console.log(`  Actual successes  : ${successCount}`);
+  console.log(`  ASSERTION         : ${passed ? 'PASS' : 'FAIL'}`);
+
+  if (!passed) {
+    console.error(`\n[FAIL] Scenario A: Expected ${STOCK_QUANTITY} successes but got ${successCount}`);
+  }
 }
 
 async function scenarioB(): Promise<void> {
@@ -121,8 +154,10 @@ async function main(): Promise<void> {
   await delay(2000);
 
   try {
+    await resetRedis();
     await scenarioA();
     await delay(1000);
+    await resetRedis();
     await scenarioB();
     console.log('\nStress test complete.');
   } catch (err) {
